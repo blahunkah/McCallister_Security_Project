@@ -113,7 +113,7 @@ unsigned int security_event_time; // s
 unsigned int security_event_angle; // deg
 unsigned int security_event_distance; // in
 int motor_period; // ms
-int ultrasonic_read_speed; // ms 
+unsigned int ultrasonic_read_speed; // ms 
 int num_ultrasonic_averages; 
 int FOV_range_min; // degrees  
 int FOV_range_max; // degrees  
@@ -214,8 +214,8 @@ void init_config() {
     reset_menu_vars();
     config_menu_active = 0;
     motor_period = 4000;
-    ultrasonic_read_speed = 100;
-    num_ultrasonic_averages = 5;
+    ultrasonic_read_speed = 200;
+    num_ultrasonic_averages = 2;
     
     steps_per_period = 8;
     step_size_deg = 22.5;
@@ -772,10 +772,19 @@ void Ranging_function(){
     Trigger_SetLow();    
 
     __delay_us(500);                // allow time for the burst and allow the gate to open
-    while (T1GVAL==1) {};           // wait while counter is still counting
+    //while (T1GVAL==1) {};           // wait while counter is still counting
+    __delay_ms(23);
     
     echo_delay=TMR1_CounterGet();   // get the measurement
-    delay_ms(ultrasonic_read_speed);// calls the single ms delay to be repeated for the count of ultrasonic_read_speed
+    //echo_delay = 0;
+    //unsigned int echo_delay_ms = echo_delay/1000;
+    //if (echo_delay_ms < ultrasonic_read_speed) {
+    //    delay_ms(ultrasonic_read_speed - echo_delay_ms);// calls the single ms delay to be repeated for the count of ultrasonic_read_speed
+    //}*/
+    
+    delay_ms(ultrasonic_read_speed - 23);
+    
+    NOP();
 }
 
 int8_t rampDirection = 1;  //initial ramp direction, 1 = counting up, -1 = counting down
@@ -792,7 +801,73 @@ void updateRampSample() {
     }
 }
 
+int map(int value, int in_min, int in_max, int out_min, int out_max) {
+    return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
+int mappedDelay;
+int beeping;
+int alarming;
+int countBeep;
+void updateBeepTiming() {
+    if (ave_inches <= dist_min && sec_timer > 5) {
+        // Critical alarm mode
+        alarming = 1;
+        beeping = 0;
+        
+    } else if(ave_inches  <= dist_max) {
+	// Normal beeping mode
+        beeping = 1;
+
+        
+        mappedDelay = map(ave_inches, dist_max, dist_min, 10, 1); // scaled OFF time
+    } else if (beeping) {
+        beeping = 0;
+    }
+}
+void beepCycle() {
+    NOP();
+    if (alarming) { // Currently OFF
+        if (countBeep == 0) {
+            BEEPP_LAT = 1;
+            LED_LAT = 1;        // LED ON with BEEPER
+        }
+        else if(countBeep >= 5 && BEEPP_LAT){
+	     BEEPP_LAT = 0;
+	     LED_LAT =0;	
+        }
+        else if(countBeep >= 10){
+	     countBeep =0;
+         return;
+        }
+    } 
+    else if(beeping){
+           if(countBeep == 0){
+	    BEEPP_LAT = 1;
+            LED_LAT = 1;        
+	   }
+           else if( countBeep >= 1 && BEEPP_LAT){
+	    BEEPP_LAT = 0;
+	     LED_LAT =0;
+	   }
+           else if( countBeep >= mappedDelay) {
+		countBeep =0;
+        return;
+           }
+    } else if (BEEPP_LAT) {
+        BEEPP_LAT = 0;
+        LED_LAT = 0;
+    }
+	countBeep++;
+}
+void resetAlarm() {
+    alarming = 0;
+    // Reset the security event log if needed
+}
+
+unsigned int num_samples = 0;
+
+#if 1
 int main(void)
 {
     SYSTEM_Initialize();
@@ -858,7 +933,9 @@ int main(void)
         
         if (config_menu_active) { // ------------- CONFIG MODE ------------- //
                 
-            // TODO reset button if alarm has been triggered
+            resetAlarm();
+            BEEPP_LAT = 0;
+            
             reset_menu_vars();
             // boring display stuff
             clearLCD();
@@ -947,13 +1024,22 @@ int main(void)
         } // CONFIG MODE END =============================================================================
 
         
+        updateBeepTiming();
+        beepCycle();
+        
+        
         Ranging_function();                     //calls ranging function
         current_inches = echo_delay/148;        //converts the echo delay to a total distance
-        sum=sum+current_inches;                 //adds to a running sum
-        ave_count++;                            //increments the counts to average the sum 
-        if(ave_count>=num_ultrasonic_averages){ //Average range function
-            ave_count=0;                        //resets the ave_count
-            ave_inches=sum/num_ultrasonic_averages; //takes average of recent measurements
+        if (current_inches != 155) {
+            sum=sum+current_inches;                 //adds to a running sum
+            ave_count++;
+        }
+        num_samples++;
+        if(num_samples>=num_ultrasonic_averages){ //Average range function
+            if (ave_count == 0) { ave_count = 1; sum = 155; }
+            num_samples=0;                        //resets the ave_count
+            ave_inches=sum/ave_count; //takes average of recent measurements
+            ave_count = 0;
             sum = 0;
             
             if (ave_inches > 200) { ave_inches = 200; }
@@ -968,6 +1054,7 @@ int main(void)
             CCP1_LoadDutyValue(sample);//Sets the CCP duty value to the sample 
 
             updateRampSample();     //updates the value used in sample
+            
             ms_timer += num_ultrasonic_averages*ultrasonic_read_speed+ultrasonic_read_speed/2;
             //approximated time that has passed in ms
             if(ms_timer>=1000){     //increases the single second count for the security recall
@@ -978,3 +1065,42 @@ int main(void)
         }        
     }
 }    
+
+#else
+void main() {
+    SYSTEM_Initialize();
+    
+    INTERRUPT_GlobalInterruptEnable(); 
+    INTERRUPT_PeripheralInterruptEnable(); 
+    
+    initLCD();          // top and bottom LCD initialization below
+    setline0LCD();
+    printf("LCD initialized");
+    __delay_ms(1000);
+    clearLCD();
+    setline1LCD();
+    printf("LCD initialized");
+    __delay_ms(1000);
+    clearLCD();
+    setline0LCD();   
+
+    init_config();
+    
+    // initializing random variables
+    button_length = 0;
+    
+    BEEPN_LAT = 0;
+    BEEPP_LAT = 0;
+    
+    int ave_count=0;    //sets the counts needed to run the average if statement
+   
+    while (1) {
+    Ranging_function();
+    clearLCD();
+    setline0LCD();
+    printf("%d", echo_delay/148);
+    __delay_ms(1000);
+    }
+    
+}
+#endif
